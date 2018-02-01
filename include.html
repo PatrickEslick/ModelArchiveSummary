@@ -1,0 +1,29 @@
+﻿<p>This software is preliminary or provisional and is subject to revision. It is being provided to meet the need for timely best science. The software has not received final approval by the U.S. Geological Survey (USGS). No warranty, expressed or implied, is made by the USGS or the U.S. Government as to the functionality of the software and related material nor shall the fact of release constitute any such warranty. The software is provided on the condition that neither the USGS nor the U.S. Government shall be held liable for any damages resulting from the authorized or unauthorized use of the software.</p>
+
+<h4>Notes about the data files</h4>
+
+<p>The datetime may be in any format that includes the day, month, year and time (with or without seconds). The format is selected from the dropdown menu. <b>This column must be named &quot;datetime&quot;.</b></p>
+
+<p>Each dataset must include streamflow. <b>This column must be named "Q". Values of streamflow of less than or equal to 0 are not allowed.</b>
+
+<p>The script works with log-transformed variables and their linear counterparts by way of a naming convention. The log-transformed version of the variable is named with a &quot;log&quot;, &quot;Log&quot;, or &quot;LOG&quot; added in front of the name of the linear observations. For example, if a linear column is titled &quot;Chl&quot;, its log counterpart must be titled &quot;logChl&quot;, &quot;LogChl&quot;, or &quot;LOGChl&quot;. Natural logs may also be used. Columns transformed with a natural log must begin with the prefixes &quot;ln&quot;, &quot;Ln&quot;, or &quot;LN&quot;. <b>You do not need to include log-transformed observations, but if you have log-transformed columns you must include their linear counterparts.</b></p>
+
+<p>If you would like to display the flow duration curves, a continuous time series of streamflow data must be provided. Check "Include flow duration curve" box and upload the file. <b>This file can have any number of columns, but must have at minimum a column called "datetime" and a column called "Q".</b>
+
+<h4>Notes about this app</h4>
+
+<p>When entering the Independent Parameter Codes, enter them in the order they appear in the variable list (check boxes) and separate each with a semi-colon. For example, if you have Q (or logQ) and SC (or logSC) as your independent variables, you would enter &quot;00060;00095&quot;. If you have only one independent variable, you may enter that code by itself (e.g. &quot;00095&quot;).</p>
+
+<p><b>If you have a date-based parameter, enter "Day" in place of a parameter code.</b> For example if your model includes logSC, cos(2*pi*date), and sin(2*pi*date), you would enter &quot;00095;Day;Day&quot;.
+
+<h4>Notes about formatting of the report</h4>
+
+<This report is optimized for HTML output, but a Word Format output is also available.</p>
+
+<p>The Word Format output of this app looks best with narrow (o.5 inch) margins and the text sizes reduced so that each table fits across the page. This is somewhat more difficult if your model includes many explanatory variables, but should be workable. Removing extraneous line breaks also improves the look and fit of the report.</p>
+
+<h4>Example Data</h4>
+
+<p>This example data is for suspended sediment (abbreviated SS) concentration at USGS site 07144100. The image below shows how the app was configured to calculate model statistics using this data.<p>
+
+

@@ -1,0 +1,1347 @@
+
+``` {r, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+  
+#Assign variables based on the shiny inputs
+StationID <- input$StationID
+form <- c(input$dep, input$ind)
+formPCodes <- c(input$pCode, strsplit(input$form_i, ";")[[1]])
+dateformat <- input$dateformat
+logtrans <- input$trans
+NWISpCode <- formPCodes[1]
+
+#Read the discrete data file
+inFile <- input$dataFile
+Data <- read.csv(inFile$datapath, sep=input$sep)
+rownames(Data) <- NULL
+Data <- na.omit(Data)
+
+#Read the continuous data file if there is one
+if(input$durCurve) {
+  inQFile <- input$QFile                                                  
+  cat(inQFile$datapath)
+  QData <- read.csv(inQFile$datapath)
+}
+
+#Paste elements together in a form that can be passed to lm()
+attach(Data)
+f <- paste(form[1], "~", form[2], sep = "")
+if(length(form)>2){
+  for(i in 3:length(form)){ 
+    f <- paste(f, form[i], sep = "+")
+  }
+}
+
+#Exclude a "flag" column if one exists. Flags are incorporated in the tobit version
+Data <- Data[,!(names(Data) %in% "flag")] 
+
+#Make the model
+g <- lm(f, data=Data)
+
+multRegOut <- multReg2(g)
+#Find flagged observations and merge them with stats (leverage, residual, cook's D)
+#flagged <- multReg2(g)$flagobs
+flagged <- multRegOut$flagobs
+for(u in 1:length(flagged)) {
+  if(is.na(flagged[u])) {
+    flagged[u] <- FALSE
+  }
+}
+#flag.obs<- multReg2(g)$diagstats[flagged,]
+flag.obs <- multRegOut$diagstats[flagged,]
+rownames(flag.obs) <- Data$datetime[as.numeric(rownames(flag.obs))]
+
+#Get test criteria for flagged observations
+test.crit <- multRegOut$crit.val
+
+#Calculate model statistics
+lm.stats <- summary.lm(g)
+Residuals <- resid(g)
+Regression.Computed <- predict(g)
+b.count <- nrow(Data)
+b.sigma <- lm.stats$sigma
+if(logtrans=="None") {
+  b.uMSPE <- (lm.stats$sigma / mean(Data[, form[1]])) * 100
+  b.lMSPE <- (lm.stats$sigma / mean(Data[, form[1]])) * 100
+} else if(logtrans=="ln") {
+  b.uMSPE <- (exp(lm.stats$sigma) - 1) * 100
+  b.lMSPE <- (1 - exp(-1 * lm.stats$sigma)) * 100
+} else if(logtrans=="Log10") {
+  b.uMSPE <- ((10 ^ lm.stats$sigma) - 1) * 100
+  b.lMSPE <- (1 - (10 ^ (-1 * lm.stats$sigma))) * 100
+}
+
+b.aMSPE <- (b.uMSPE + b.lMSPE) / 2
+
+b.rsquared <- lm.stats$r.squared
+b.adjrsquared <- lm.stats$adj.r.squared
+
+
+#Calculate Variance Inflation Factor if there are more than two explanatory variables
+if(length(form)>2) {
+  b.vif <- multRegOut$vif
+}
+
+#Calculate bias correction factor if the dependent variable is transformed
+if(logtrans=="Log10"){
+  b.bcf <- mean(10^Residuals)
+} else if(logtrans=="ln") {
+  b.bcf <- mean(exp(Residuals))
+} else {
+  b.bcf <- 1.0
+}
+
+#Assign names for the basic data data frame
+b.names <- c("No. of Observations","RMSE", "Average MSPE", "R^2","Adj. R^2")
+if(logtrans != "None"){
+  b.names <- c(b.names, "BCF")
+}
+
+#Collect stats about the model into a data frame
+basicdata <- data.frame(b.count, b.sigma, b.aMSPE, b.rsquared, b.adjrsquared)
+if(logtrans %in% c("Log10", "ln")){
+  basicdata[,"BCF"] <- b.bcf
+}
+names(basicdata) <- b.names
+
+#Calculate normal quantiles
+temp <- data.frame(1:length(Residuals),Residuals)
+names(temp) <- c("Original.Pos", "Residuals")
+n <- length(temp[[1]])                             #number of obs/ sample size
+temp <- temp[order(temp$Residuals),]               #Rank by residual
+
+#Calculate plotting position with the Cunnane formula (a=0.4) Helsel & Hirsch p.23
+temp$Rank <- 1:n
+temp$Cunnane <- (temp$Rank - 0.4)/(n + 0.2)
+temp$Normal.Quantiles <- qnorm(temp$Cunnane)
+temp <- temp[order(temp$Original.Pos),]     
+
+obs.data <- cbind(Regression.Computed, Residuals, temp$Normal.Quantiles)
+colnames(obs.data)[1] <- "Regression.Computed"
+colnames(obs.data)[3] <- "Normal.Quantiles"
+
+obs.data<-data.frame(obs.data)
+
+rm(temp)
+
+D.names <- NULL
+E.names <- NULL
+
+#Assign the possible prefixes for each transformation, and how long each prefix is
+if(logtrans=="Log10") {
+  prefix <- c("log", "LOG", "Log")
+  pre_pos <- 3
+} else if (logtrans=="ln") {
+  prefix <- c("ln", "LN", "Ln")
+  pre_pos <- 2
+} else {
+  prefix <- ""
+  pre_pos <- 100
+}
+
+#Formnl will be equivalent to form, with variable names with prefixes removed
+formnl <- vector() 
+for(x in 1:length(form)){
+  if(substr(form[x], 1, pre_pos) %in% prefix){
+    #If the variable is transformed, name the untransformed version
+    formnl[x] <- substr(form[x], pre_pos + 1, 100)
+    #Depending on the transformation, add a column of untransformed data
+    if(logtrans=="Log10") {
+      Data[,formnl[x]] <- 10^(Data[,form[x]])
+    } else if(logtrans=="ln") {
+      Data[,formnl[x]] <- exp(Data[,form[x]])
+    }
+  } else {
+    formnl[x] <- form[x]
+  }
+}
+
+#Separate dependent variable (log or linear) from the explanatory variables D.names - dependent, E.names - explanatory
+for(x in unique(c(form, formnl))){
+  if(x %in% c(form[1], formnl[1])){
+    D.names <- c(D.names, x)
+  } else {
+    E.names <- c(E.names, x)
+  }
+}
+
+#Subset the Data file by dependent and explanatory variables
+D.vars.summ <- data.frame(Data[,D.names])
+E.vars.summ <- data.frame(Data[,E.names])
+
+#Make sure all the imported number columns are numeric and not factors.
+for(y in names(D.vars.summ)) {
+  D.vars.summ[,y] <- as.numeric(D.vars.summ[,y])
+}
+for(z in names(E.vars.summ)) {
+  E.vars.summ[,z] <- as.numeric(E.vars.summ[,z])
+}
+
+#Explanatory Variable Summary Statistics
+row.names<-c("Minimum" , "1st Quartile" , "Median" , "Mean" , "3rd Quartile" , "Maximum")
+
+#set up column names depending on the number of constituents
+col.names <- matrix(NA , nrow=1, ncol=length(E.vars.summ))
+for (i in 1:length(E.vars.summ)){
+  col.names[i] <- names(E.vars.summ[i])  
+}
+
+i <- length(E.vars.summ)
+E.mat <- matrix(data=NA, nrow=6, ncol=length(E.vars.summ))
+for (j in 1:length(E.vars.summ)) { 
+  E.mat[1,j] <- min(E.vars.summ[[j]])
+  E.mat[2,j] <- quantile(E.vars.summ[[j]] , 0.25)
+  E.mat[3,j] <- quantile(E.vars.summ[[j]] , 0.5)
+  E.mat[4,j] <- mean(E.vars.summ[[j]])
+  E.mat[5,j] <- quantile(E.vars.summ[[j]] , 0.75)
+  E.mat[6,j] <- max(E.vars.summ[[j]])
+}
+
+E.df <- data.frame(E.mat, row.names=row.names)
+colnames(E.df) <- col.names
+
+####Dependent Variable Summary Statistics
+
+#Set up column names depending on the number of constituents
+col.names <- matrix(NA , nrow=1, ncol=length(D.vars.summ))
+for (i in 1:length(D.vars.summ)){
+  col.names[i] <- names(D.vars.summ[i])  
+}
+
+i <- length(D.vars.summ)
+D.mat <- matrix(data=NA, nrow=6, ncol=length(D.vars.summ))
+for (j in 1:length(D.vars.summ)){ 
+  D.mat[1,j] <- min(D.vars.summ[[j]])
+  D.mat[2,j] <- quantile(D.vars.summ[[j]] , 0.25)
+  D.mat[3,j] <- quantile(D.vars.summ[[j]] , 0.5)
+  D.mat[4,j] <- mean(D.vars.summ[[j]])
+  D.mat[5,j] <- quantile(D.vars.summ[[j]] , 0.75)
+  D.mat[6,j] <- max(D.vars.summ[[j]])
+}
+
+D.df <- data.frame(D.mat, row.names=row.names)
+colnames(D.df) <- col.names
+
+#Correlation matrix
+
+E.vars <- Data[,form[2:length(form)]]
+dim <- length(E.vars) + 1
+cov.mat <- matrix(data=NA, nrow=dim, ncol=dim)
+
+cov.data<-cbind(1,E.vars)                 #set up data frame for cov matrix
+cov.data<-as.matrix(cov.data)             #convert to matrix data type
+tcov.data<-t(cov.data)                    #transpose matrix
+cov.mat<-tcov.data %*% cov.data           #multiply the matrix by its transpose
+covTry <- try({cov.mat<-solve(cov.mat)}, silent=TRUE)                   #invert
+
+if(class(covTry) != "try-error") {
+  if(nrow(cov.mat)>=2){
+    cov.mat[1,2]<-cov.mat[1,2]/((cov.mat[1,1]*cov.mat[2,2])^0.5)}
+  if(nrow(cov.mat)>=3){
+    cov.mat[1,3]<-cov.mat[1,3]/((cov.mat[1,1]*cov.mat[3,3])^0.5)}
+  if(nrow(cov.mat)>=4){
+    cov.mat[1,4]<-cov.mat[1,4]/((cov.mat[1,1]*cov.mat[4,4])^0.5)}
+  if(nrow(cov.mat)>=5){
+    cov.mat[1,5]<-cov.mat[1,5]/((cov.mat[1,1]*cov.mat[5,5])^0.5)}
+  if(nrow(cov.mat)>=6){
+    cov.mat[1,6]<-cov.mat[1,6]/((cov.mat[1,1]*cov.mat[6,6])^0.5)}
+  if(ncol(cov.mat)>=2){
+    cov.mat[2,1]<-cov.mat[2,1]/((cov.mat[2,2]*cov.mat[1,1])^0.5)
+    if(nrow(cov.mat)>=3){
+      cov.mat[2,3]<-cov.mat[2,3]/((cov.mat[2,2]*cov.mat[3,3])^0.5)}
+    if(nrow(cov.mat)>=4){
+      cov.mat[2,4]<-cov.mat[2,4]/((cov.mat[2,2]*cov.mat[4,4])^0.5)}
+    if(nrow(cov.mat)>=5){
+      cov.mat[2,5]<-cov.mat[2,5]/((cov.mat[2,2]*cov.mat[5,5])^0.5)}
+    if(nrow(cov.mat)>=6){
+      cov.mat[2,6]<-cov.mat[2,6]/((cov.mat[2,2]*cov.mat[6,6])^0.5)}
+  }
+  if(ncol(cov.mat)>=3){
+    cov.mat[3,1]<-cov.mat[3,1]/((cov.mat[3,3]*cov.mat[1,1])^0.5)
+    cov.mat[3,2]<-cov.mat[3,2]/((cov.mat[3,3]*cov.mat[2,2])^0.5)
+    if(nrow(cov.mat)>=4){
+      cov.mat[3,4]<-cov.mat[3,4]/((cov.mat[3,3]*cov.mat[4,4])^0.5)}
+    if(nrow(cov.mat)>=5){
+      cov.mat[3,5]<-cov.mat[3,5]/((cov.mat[3,3]*cov.mat[5,5])^0.5)}
+    if(nrow(cov.mat)>=6){
+      cov.mat[3,6]<-cov.mat[3,6]/((cov.mat[3,3]*cov.mat[6,6])^0.5)}
+  }  
+  if(ncol(cov.mat)>=4){
+    cov.mat[4, 1] <- cov.mat[4, 1] / ((cov.mat[4, 4] * cov.mat[1, 1]) ^ 0.5)
+    cov.mat[4,2]<-cov.mat[4,2]/((cov.mat[4,4]*cov.mat[2,2])^0.5)
+    cov.mat[4,3]<-cov.mat[4,3]/((cov.mat[4,4]*cov.mat[3,3])^0.5)
+    if(nrow(cov.mat)>=5){
+      cov.mat[4,5]<-cov.mat[4,5]/((cov.mat[4,4]*cov.mat[5,5])^0.5)}
+    if(nrow(cov.mat)>=6){
+      cov.mat[4,6]<-cov.mat[4,6]/((cov.mat[4,4]*cov.mat[6,6])^0.5)}
+  }
+  if(ncol(cov.mat)>=5){
+    cov.mat[5, 1] <- cov.mat[5, 1] / ((cov.mat[5, 5] * cov.mat[1, 1]) ^ 0.5)
+    cov.mat[5, 2] <- cov.mat[5, 2] / ((cov.mat[5, 5] * cov.mat[2, 2]) ^ 0.5)
+    cov.mat[5, 3] <- cov.mat[5, 3] / ((cov.mat[5, 5] * cov.mat[3, 3]) ^ 0.5)
+    cov.mat[5, 4] <- cov.mat[5, 4] / ((cov.mat[5, 5] * cov.mat[4, 4]) ^ 0.5)
+    if(nrow(cov.mat)>=6){
+      cov.mat[5, 6] <- cov.mat[5, 6] / ((cov.mat[5, 5] * cov.mat[6, 6]) ^ 0.5)}
+  }
+  if(ncol(cov.mat)>=6){
+    cov.mat[6, 1] <- cov.mat[6, 1] / ((cov.mat[6, 6] * cov.mat[1, 1]) ^ 0.5)
+    cov.mat[6, 2] <- cov.mat[6, 2] / ((cov.mat[6, 6] * cov.mat[2, 2]) ^ 0.5)
+    cov.mat[6, 3] <- cov.mat[6, 3] / ((cov.mat[6, 6] * cov.mat[3, 3]) ^ 0.5)
+    cov.mat[6, 4] <- cov.mat[6, 4] / ((cov.mat[6, 6] * cov.mat[4, 4]) ^ 0.5)
+    cov.mat[6, 5] <- cov.mat[6, 5] / ((cov.mat[6, 6] * cov.mat[5, 5]) ^ 0.5)  
+  }
+  if(nrow(cov.mat)>=1){
+    cov.mat[1,1]<-1}
+  if(nrow(cov.mat)>=2){
+    cov.mat[2,2]<-1}
+  if(nrow(cov.mat)>=3){
+    cov.mat[3,3]<-1}
+  if(nrow(cov.mat)>=4){
+    cov.mat[4,4]<-1}
+  if(nrow(cov.mat)>=5){
+    cov.mat[5,5]<-1}
+  if(nrow(cov.mat)>=6){
+    cov.mat[6,6]<-1}
+  row.names(cov.mat)[1] <- "Intercept"
+  colnames(cov.mat)[1] <- "Intercept"
+  cov.mat <- round(cov.mat, digits=4) #Round all to 4 sig figs.
+} else {
+  cov.mat <- cor(Data[,form])
+}
+
+```
+ 
+## Model Statistics, Data, and Plots
+ 
+### Model
+ 
+```{r, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+#Paste the coefficients and model names together in an equation
+coeff <- coef(g)
+names(coeff) <- NULL
+model_form <- paste(form[1], " = ", sep="")
+for(x in 2:length(form)){
+  if(coeff[x] < 0) {
+    model_form <- paste(model_form, paste(as.character(signif(abs(coeff[x]), 3)), "*", form[x], sep=" "), sep=" - ")
+  } else {
+    model_form <- paste(model_form, paste(as.character(signif(abs(coeff[x]), 3)), "*", form[x], sep=" "), sep=" + ")
+  }
+}
+if(coeff[1] < 0) {
+  model_form <- paste(model_form, as.character(signif(abs(coeff[1]), 3)), sep=" - ")
+} else {
+  model_form <- paste(model_form, as.character(signif(abs(coeff[1]), 3)), sep=" + ")
+}
+```
+ 
+`r model_form`
+
+### Variable Summary Statistics
+ 
+```{r, echo=FALSE, results='hide', warning=FALSE, message=FALSE}
+#Summarize oberservations of model data. Quartiles and mean of each variable, with and without its transformations
+
+options(width=200)
+
+ex <- unique(form, formnl)
+
+if(ncol(D.df)==1) {
+  names(D.df) <- form[1]
+}
+if(ncol(E.df)==1) {
+  names(E.df) <- form[2]
+}
+fd <- data.frame(D.df, E.df)
+fdi <- try({fd[,c(form,formnl[ex])]}, silent=TRUE)
+
+if(class(fdi) == "try-error") {
+  fd <- fd
+} else {
+  fd <- fdi
+}
+
+fd <- signif(fd, digits=3)
+
+Data$datetime <- as.POSIXct(Data$datetime, format=dateformat)
+datetime <- Data$datetime
+cens <- try({findCensored(StationID, NWISpCode, strftime(Data$datetime[1],format="%Y-%m-%d"),
+                     strftime(Data$datetime[length(Data$datetime)],format="%Y-%m-%d"))}, silent=TRUE)
+
+if(class(cens) == "try-error") {
+  cens <- data.frame()
+} else {
+  check_dates <- as.Date(Data$datetime)
+  cens <- cens[cens$date %in% check_dates,]
+}
+cens <- data.frame()
+
+if(nrow(cens)>0) {
+  cens <- as.factor(cens$value)
+  for(i in 1:length(levels(cens))) {
+    fd[paste("Censored [",levels(cens)[i],"]",sep=""),] <- as.character(floor(rep(length(
+      cens[cens==levels(cens)[i]]),ncol(fd))))
+    for(j in colnames(fd)) {
+      if(j != form[1] & j != formnl[1]) {
+        fd[paste("Censored [",levels(cens)[i],"]",sep=""),j] <- "--"
+      }
+    }
+  }
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE}
+fd
+```
+ 
+### Box Plots
+ 
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, results='hide', fig.height=6, fig.width=6}
+#Manually calculate and set plotting limits for the linearly scaled plot
+td1 <- data.frame(c(1,2,3,4,5))
+for(x in form) {
+  td1[,length(td1)+1] <- boxplot.stats(Data[,x], coef=0)$stats
+}
+td1 <- td1[,2:length(td1)]
+wilk_y <- extended(max(td1[5,])*1.2,min(td1[2,])*0.8,5,only.loose=TRUE)
+
+#Set up the label for the y-axis on the linearly scaled plot
+ylabel <- ""
+for(p in 1:length(formnl)) {
+  if(formPCodes[p] != "Day") {
+    ylabel <- paste(ylabel,paste(bigLabel(formnl[p],formPCodes[p]),"\n",sep=""),sep="")
+  }
+}
+
+if(logtrans %in% c("ln", "Log10")) {
+  layout(matrix(c(1,2),nrow=1,ncol=2))
+
+  par(mar=c(8,7,3,0),cex.lab=0.8, cex.axis=0.8)
+  bp1 <- bxp(boxplot(Data[,form],plot=FALSE, range=0), names=form, horizontal=FALSE, 
+              las=2, yaxt='n', yaxs="i", ylim=c(min(wilk_y),max(wilk_y)), ylab="Log units")
+  axis(2,at=wilk_y,labels=format(wilk_y,format="d",big.mark=","),las=2)
+  for(i in 1:length(form)) {
+    text(x=i,y=boxplot.stats(Data[,form[i]], coef=0)$stats[5],
+       as.character(length(Data[,form[i]])), pos=3, cex=0.75)
+  }
+  
+  #Manually determine plot limits for the second plot (log values in linear space)
+  td2 <- data.frame(c(1,2,3,4,5))
+  for(x in formnl) {
+    td2[,length(td2)+1] <- boxplot.stats(Data[,x], coef=0)$stats
+  }
+  td2 <- td2[,2:length(td2)]
+  wilk_y2 <- extended(max(td2[5,])*1.2,min(td2[2,])*0.8,5,only.loose=TRUE)
+  
+  par(mar=c(8,7,3,0),cex.lab=0.8, cex.axis=0.8)
+  bp2 <- bxp(boxplot(Data[,formnl],plot=FALSE, range=0), names=formnl, horizontal=FALSE,
+                 las=2, yaxt='n',yaxs="i", ylim=c(min(wilk_y2),max(wilk_y2)),  ylab=ylabel, add=FALSE)
+  axis(2,at=wilk_y2,labels=format(wilk_y2,format="d",big.mark=","),las=2)
+  
+  for(i in 1:length(formnl)) {
+  text(x=i,y=boxplot.stats(Data[,formnl[i]], coef=0)$stats[5],
+       as.character(length(Data[,formnl[i]])), pos=3, cex=0.75)
+  }
+}
+  
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=6, fig.width=3.5}
+if(!(logtrans %in% c("ln", "Log10"))) {
+  par(mar=c(8,7,3,0),cex.lab=0.8, cex.axis=0.8)
+  bp1 <- bxp(boxplot(Data[,form],plot=FALSE, range=0), outline=FALSE, names=form, horizontal=FALSE, las=2, 
+                 yaxt='n', yaxs="i", ylim=c(min(wilk_y),max(wilk_y)), ylab=ylabel)
+  axis(2,at=wilk_y,labels=format(wilk_y,format="d",big.mark=","),las=2)
+  for(i in 1:length(formnl)) {
+    text(x=i, y=boxplot.stats(Data[,formnl[i]], coef=0)$stats[5],
+         as.character(length(Data[,formnl[i]])), pos=3, cex=0.75)
+  }
+}
+```
+ 
+### Exploratory Plots
+ 
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=4, fig.width=7}
+pairs(Data[,form], panel=panel.smooth)
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=3.5, fig.width=7}
+if(input$durCurve) {
+  #Open a new copy of the sample data file, format the date and calculate year, month day, hour and dectime
+  mai1<-0.4
+  mai2<-0.3
+  mai3<-0.3
+  mai4<-0.3
+  par(lwd=2,xaxs="i",yaxs="i",mgp=c(3,0.3,0),
+      omi=c(0.5,0.5,0.5,0.5),mai=c(mai1,mai2,mai3,mai4),cex=1.00,font=1)
+  
+  sampleData <- Data
+  sampleData <- sampleData[,c("datetime", "Q", form[1])]
+  sampleData$dectime <- decimal_date(sampleData$datetime) #Add decimal date
+  sampleData$year <- year(sampleData$datetime)
+  sampleData$month <- month(sampleData$datetime)
+  sampleData$day <- day(sampleData$datetime)
+  sampleData$hour <- hour(sampleData$datetime)
+  
+  #Load the continuous Q data, format the date and calculate year, month day, hour and dectime
+  
+  QData$pQ <- QData$Q
+  QData <- QData[,c("datetime", "pQ")]
+  QData$datetime <- as.POSIXct(QData$datetime, format=input$Qdateformat)
+  QData <- na.omit(QData)
+  QData$pdectime <- decimal_date(QData$datetime)
+  QData$year <- year(QData$datetime)
+  QData$month <- month(QData$datetime)
+  QData$day <- day(QData$datetime)
+  QData$hour <- hour(QData$datetime)
+  
+  #January - December duration plot
+  
+  cal1 <- sampleData
+  pred1 <- QData
+  
+  temp1 <- merge(pred1, cal1, by=c("year","month","day","hour"), all=TRUE)
+  
+  # Exclude years with population streamflow data outside the time span of sample data
+  caldatemin <- min(cal1$dectime)
+  caldatemax <- max(cal1$dectime)
+  predcal1 <- subset(temp1, pdectime > floor(caldatemin) & pdectime < ceiling(caldatemax))
+  predcal2 <- subset(predcal1, !(is.na(predcal1["pQ"])))
+  ymin <- floor(log10(min(predcal2$pQ)))
+  ymax <- ceiling(log10(max(predcal2$pQ)))
+  ystep <- 1
+  xmin <- 0.0
+  xmax <- 100.0
+  xstep <- 10.0
+  tab <- table(predcal2$pQ)
+  cpct <- 100 * cumsum(tab)/length(predcal2$pQ)
+  pQ <- as.numeric(as.character(names(tab)))
+  temp <- data.frame(pQ, cpct)
+  tempnames <- c("pQ", "cpct")
+  names(temp) <- tempnames
+  predcal3 <- merge(predcal2, temp, by=c("pQ"), all=TRUE)
+  plot(predcal3$cpct, log10(predcal3$pQ), type="l", lty=1, lwd=1, axes=F, xlim=c(xmin,xmax), 
+       ylim = c(ymin, ymax), ylab="", xlab="")
+  predcal4 <- subset(predcal3, !(is.na(predcal3[form[1]])))
+  points(predcal4$cpct, log10(predcal4$pQ), pch=1, mkh=0.07)
+  
+  axis(side=2, labels=T, adj=1, las=2, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2, cex=0.8)
+  axis(side=2, labels=F, tck=0.015, at = seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=1, labels=T, adj=0.5, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2, cex=0.8)
+  axis(side=1, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  axis(side=4, labels=F, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2)
+  axis(side=4, labels=F, tck=0.015, at=seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=3, labels=F, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2)
+  axis(side=3, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  mtext("January-December", outer=F, line=0.2, side=3, at=50, adj=0.5, cex=0.8)
+  mtext("Logarithm of streamflow (cubic feet per second)",outer=T,line=0.5,side=2,cex=0.80)
+  mtext("Percent of time streamflow is equal to or less than given value",
+        outer=T,line=0.5,side=1,cex=0.80)
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=7, fig.wdith=10}
+if(input$durCurve) {
+  par.defaults <- par(no.readonly=TRUE)
+  # save(par.defaults,file="R.default.par.RData") 
+  mai1 <- 0.3
+  mai2 <- 0.3
+  mai3 <- 0.2
+  mai4 <- 0.2
+  par(mfrow=c(2, 2), lwd=2, xaxs="i", yaxs="i", mgp=c(3, 0.3, 0),
+      omi=c(0.5, 0.5, 0.25, 0.5), mai=c(mai1, mai2, mai3, mai4), cex=1.00, font=1)
+  
+  #January - March duration plot
+  predcal2 <- subset(predcal1, !(is.na(predcal1["pQ"])) & predcal1$month > 0 & predcal1$month < 4)
+  ymin <- floor(log10(min(predcal2$pQ)))
+  ymax <- ceiling(log10(max(predcal2$pQ)))
+  ystep <- 1
+  xmin <- 0.0
+  xmax <- 100.0
+  xstep <- 10.0
+  
+  tab <- table(predcal2$pQ)
+  
+  cpct <- 100 * cumsum(tab)/length(predcal2$pQ)
+  
+  pQ <- as.numeric(as.character(names(tab)))
+  temp <- data.frame(pQ, cpct)
+  tempnames <- c("pQ", "cpct")
+  names(temp) <- tempnames
+  predcal3 <- merge(predcal2, temp, by=c("pQ"), all=TRUE)
+  
+  plot(predcal3$cpct, log10(predcal3$pQ), type="l", lty=1, lwd=1, axes=F, xlim=c(xmin, xmax),
+       ylim=c(ymin, ymax), ylab="", xlab="")
+  
+  predcal4 <- subset(predcal3,!(is.na(predcal3[form[1]])))
+  points(predcal4$cpct, log10(predcal4$pQ), pch=1, mkh=0.07)
+  
+  axis(side=2, labels=T, adj=1, las=2, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2, cex=0.8)
+  axis(side=2, labels=F, tck=0.015, at=seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=1, labels=T, adj=0.5, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2, cex=0.8)
+  axis(side=1, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  axis(side=4, labels=F, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2)
+  axis(side=4, labels=F, tck=0.015, at=seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=3, labels=F, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2)
+  axis(side=3, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  
+  mtext("January-March", outer=F, line=0.2, side=3, at=50, adj=0.5, cex=0.80)
+  
+  #April - June duration plot
+  predcal2 <- subset(predcal1, !(is.na(predcal1["pQ"])) & predcal1$month > 3 & predcal1$month < 7)
+  
+  # Compute y axis boundaries
+  ymin <- floor(log10(min(predcal2$pQ)))
+  ymax <- ceiling(log10(max(predcal2$pQ)))
+  ystep <- 1
+  
+  # Define x axis boundaries
+  xmin <- 0.0
+  xmax <- 100.0
+  xstep <- 10.0
+  
+  # Compute cumulative frequency percent for population streamflow
+  tab <- table(predcal2$pQ)
+  # The following statement gets the cumulative frequency percent
+  cpct <- 100 * cumsum(tab)/length(predcal2$pQ)
+  # The following statement gets values associated with the cumulative frequency percent
+  pQ <- as.numeric(as.character(names(tab)))
+  temp <- data.frame(pQ, cpct)
+  tempnames <- c("pQ", "cpct")
+  names(temp) <- tempnames
+  predcal3 <- merge(predcal2, temp, by=c("pQ"), all=TRUE)
+  
+  # Plot cumulative frequency curve for population streamflow
+  plot(predcal3$cpct, log10(predcal3$pQ), type="l", lty=1, lwd=1, axes=F, xlim=c(xmin, xmax),
+       ylim=c(ymin, ymax), ylab="", xlab="")
+  # Overlay when samples were collected on the cumulative frequency curve
+  predcal4 <- subset(predcal3, !(is.na(predcal3[form[1]])))
+  points(predcal4$cpct, log10(predcal4$pQ), pch=1, mkh=0.07)
+  
+  # Draw axes on plot
+  axis(side=2, labels=T, adj=1, las=2, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2, cex=0.8)
+  axis(side=2, labels=F, tck=0.015, at=seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=1, labels=T, adj=0.5, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2, cex=0.8)
+  axis(side=1, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  axis(side=4, labels=F, tck=0.025, at=seq(ymin, ymax, ystep), lwd=2)
+  axis(side=4, labels=F, tck=0.015, at=seq(ymin, ymax, ystep/4), lwd=2)
+  axis(side=3, labels=F, tck=0.025, at=seq(xmin, xmax, xstep), lwd=2)
+  axis(side=3, labels=F, tck=0.015, at=seq(xmin, xmax, xstep/10), lwd=2)
+  
+  mtext("April-June", outer=F, line=0.2, side=3, at=50, adj=0.5, cex=0.80)
+  
+  predcal2<-subset(predcal1, !(is.na(predcal1["pQ"])) & predcal1$month > 6 & predcal1$month < 10)
+  #cat ("\n")
+  #print(summary(predcal2$pQ))
+  
+  # Compute y axis boundaries
+  ymin<-floor(log10(min(predcal2$pQ)))
+  ymax<-ceiling(log10(max(predcal2$pQ)))
+  ystep<-1
+  
+  # Define x axis boundaries
+  xmin<-0.0
+  xmax<-100.0
+  xstep<-10.0
+  
+  xmin<0.0
+  xmax<-100.0
+  xstep<-10.0
+  
+  # Compute cumulative frequency percent for population streamflow
+  tab<-table(predcal2$pQ)
+  # The following statement gets the cumulative frequency percent
+  cpct<-100*cumsum(tab)/length(predcal2$pQ)
+  # The following statement gets values associated with the cumulative frequency percent
+  pQ<-as.numeric(as.character(names(tab)))
+  temp<-data.frame(pQ,cpct)
+  tempnames<-c("pQ","cpct")
+  names(temp)<-tempnames
+  predcal3<-merge(predcal2,temp,by=c("pQ"),all=TRUE)
+  
+  # Plot cumulative frequency curve for population streamflow
+  plot(predcal3$cpct,log10(predcal3$pQ),type="l",lty=1,lwd=1,axes=F,xlim=c(xmin,xmax),ylim=c(ymin,ymax),ylab="",xlab="")
+  # Overlay when samples were collected on the cumulative frequency curve
+  predcal4<-subset(predcal3,!(is.na(predcal3[form[1]])))
+  points(predcal4$cpct,log10(predcal4$pQ),pch=1,mkh=0.07)
+  
+  # Draw axes on plot
+  axis(side=2,labels=T,adj=1,las=2,tck=0.025,at=seq(ymin,ymax,ystep),lwd=2,cex=0.8)
+  axis(side=2,labels=F,tck=0.015,at=seq(ymin,ymax,ystep/4),lwd=2)
+  axis(side=1,labels=T,adj=0.5,tck=0.025,at=seq(xmin,xmax,xstep),lwd=2,cex=0.8)
+  axis(side=1,labels=F,tck=0.015,at=seq(xmin,xmax,xstep/10),lwd=2)
+  axis(side=4,labels=F,tck=0.025,at=seq(ymin,ymax,ystep),lwd=2)
+  axis(side=4,labels=F,tck=0.015,at=seq(ymin,ymax,ystep/4),lwd=2)
+  axis(side=3,labels=F,tck=0.025,at=seq(xmin,xmax,xstep),lwd=2)
+  axis(side=3,labels=F,tck=0.015,at=seq(xmin,xmax,xstep/10),lwd=2)
+  
+  mtext("July-September",outer=F,line=0.2,side=3,at=50,adj=0.5,cex=0.80)
+  
+  predcal2<-subset(predcal1,!(is.na(predcal1["pQ"])) & predcal1$month>9 & predcal1$month<13)
+  
+  # Compute y axis boundaries
+  ymin<-floor(log10(min(predcal2$pQ)))
+  ymax<-ceiling(log10(max(predcal2$pQ)))
+  ystep<-1
+  
+  # Define x axis boundaries
+  xmin<-0.0
+  xmax<-100.0
+  xstep<-10.0
+  
+  # Compute cumulative frequency percent for population streamflow
+  tab<-table(predcal2$pQ)
+  # The following statement gets the cumulative frequency percent
+  cpct<-100*cumsum(tab)/length(predcal2$pQ)
+  # The following statement gets values associated with the cumulative frequency percent
+  pQ<-as.numeric(as.character(names(tab)))
+  temp<-data.frame(pQ,cpct)
+  tempnames<-c("pQ","cpct")
+  names(temp)<-tempnames
+  predcal3<-merge(predcal2,temp,by=c("pQ"),all=TRUE)
+  
+  # Plot cumulative frequency curve for population streamflow
+  plot(predcal3$cpct,log10(predcal3$pQ),type="l",lty=1,lwd=1,axes=F,xlim=c(xmin,xmax),ylim=c(ymin,ymax),ylab="",xlab="")
+  # Overlay when samples were collected on the cumulative frequency curve
+  predcal4<-subset(predcal3,!(is.na(predcal3[form[1]])))
+  points(predcal4$cpct,log10(predcal4$pQ),pch=1,mkh=0.07)
+  
+  # Draw axes on plot
+  axis(side=2,labels=T,adj=1,las=2,tck=0.025,at=seq(ymin,ymax,ystep),lwd=2,cex=0.8)
+  axis(side=2,labels=F,tck=0.015,at=seq(ymin,ymax,ystep/4),lwd=2)
+  axis(side=1,labels=T,adj=0.5,tck=0.025,at=seq(xmin,xmax,xstep),lwd=2,cex=0.8)
+  axis(side=1,labels=F,tck=0.015,at=seq(xmin,xmax,xstep/10),lwd=2)
+  axis(side=4,labels=F,tck=0.025,at=seq(ymin,ymax,ystep),lwd=2)
+  axis(side=4,labels=F,tck=0.015,at=seq(ymin,ymax,ystep/4),lwd=2)
+  axis(side=3,labels=F,tck=0.025,at=seq(xmin,xmax,xstep),lwd=2)
+  axis(side=3,labels=F,tck=0.015,at=seq(xmin,xmax,xstep/10),lwd=2)
+  
+  mtext("October-December",outer=F,line=0.2,side=3,at=50,adj=0.5,cex=0.80)
+  mtext("Logarithm of streamflow (cubic feet per second)",outer=T,line=0.5,side=2,cex=0.80)
+  mtext("Percent of time streamflow is equal to or less than given value",
+        outer=T,line=0.5,side=1,cex=0.80)
+  par(par.defaults)
+}
+```
+
+### Basic Model Statistics
+ 
+```{r echo=FALSE, comment=""}
+#Output a table of data about the model, calculated in 1st chunk
+b.mat = basicdata
+b.mat = t(b.mat)
+colnames(b.mat) = " "
+b.mat[,1] <- as.character(signif(b.mat[,1], digits=3))
+b.mat <- data.frame(b.mat)
+colnames(b.mat) = " "
+if(nrow(b.mat)==6) {
+  row.names(b.mat) <- c("Number of Observations","Standard error (RMSE)","Average Model standard percentage error (MSPE)", 
+                        "Coefficient of determination (R\U00B2)","Adjusted Coefficient of Determination (Adj. R\U00B2)",
+                        "Bias Correction Factor (BCF)")
+}
+if(nrow(b.mat)==5) {
+  row.names(b.mat) <- c("Number of Observations","Standard error (RMSE)","Average Model standard percentage error (MSPE)",
+                        "Coefficient of determination (R\U00B2)","Adjusted Coefficient of Determination (Adj. R\U00B2)")
+}
+print(b.mat)
+
+if(length(form)>2) {
+  cat("Variance Inflation Factors (VIF)\n")
+  print(b.vif, digits=3)
+}
+```
+ 
+### Explanatory Variables
+ 
+```{r echo=FALSE, comment=""}
+coef <- data.frame(lm.stats$coefficients)
+colnames(coef) <- c("Coefficients","Standard Error","t value","Pr(>|t|)")
+coef <- signif(coef, digits=3)
+print(coef, digits=3)
+```
+ 
+### Correlation Matrix
+ 
+```{r echo=FALSE, comment=""}
+cov.mat <- signif(cov.mat, digits=3)
+print(cov.mat, digits=3)
+```
+ 
+### Outlier Test Criteria
+ 
+```{r echo=FALSE, comment=""}
+names(test.crit) <- c("Leverage","Cook\'s D","DFFITS")
+print(test.crit, digits=3)
+```
+
+\footnotesize
+ 
+### Flagged Observations
+ 
+```{r echo=FALSE, comment="",size=8}
+options(width=120)
+names(flag.obs) <- c(form[1],"Estimate","Residual","Standard Residual","Studentized Residual","Leverage","Cook\'s D","DFFITS")
+#head(flag.obs, length(flag.obs))
+if(nrow(flag.obs)>0) {
+  for(i in 1:ncol(flag.obs)) {
+    flag.obs[,i] <- signif(as.numeric(flag.obs[,i]), 3)
+  }
+  flag.obs
+} else {
+  cat("No flagged observations")
+}
+
+```
+
+\normalsize
+ 
+### Statistical Plots
+ 
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, results='hide'}
+#REGRESSION COMPUTED VS RESIDUAL
+par(mfcol=c(2,2))
+if(logtrans == "None") {
+  transient <- data.frame(obs.data$Regression.Computed, y=resid(g))
+  names(transient) <- c("Regression.Computed","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  t <- max(abs(Regression.Computed))
+  t <- 1.1*t
+  wilk_x <- extended(max(transient$Regression.Computed),min(transient$Regression.Computed),5,only.loose=TRUE)
+  pl2 <- ggplot(transient, aes(x=Regression.Computed, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous(limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    scale_x_continuous("Regression Computed",limits=c(min(wilk_x),max(wilk_x)),breaks=wilk_x,expand=c(0,0),labels=comma)
+    geom_hline(aes(yintercept=0)) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  rm(transient)
+}
+if(logtrans != "None") {
+  transient <- data.frame(obs.data$Regression.Computed, y=resid(g))
+  names(transient) <- c("Regression.Computed","Residuals")
+  if(logtrans=="Log10")  
+    transient$Regression.Computed <- 10^transient$Regression.Computed
+  if(logtrans=="ln")
+    transient$Regression.Computed <- exp(transient$Regression.Computed)
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  pl2 <- ggplot(transient, aes(x=Regression.Computed, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("Residual",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) + 
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(logtrans=="Log10") {
+    pl2 <- pl2 + scale_x_log10("Regression Computed",limits=scaleLog(transient$Regression.Computed),expand=c(0,0),labels=comma)
+  } else if(logtrans=="ln") {
+    breaks <- scaleLN(transient$Regression.Computed)
+    pl2 <- pl2 + scale_x_continuous("Regression Computed",labels=comma, trans="log", breaks=breaks, limits=c(min(breaks), max(breaks)),
+                                    expand = c(0,0)) +
+      theme(axis.text.x = element_text(angle=45, hjust=1))
+  }
+  rm(transient)
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, results='hide'}
+#DATE VS RESIDUAL
+transient <- data.frame(as.Date(datetime), resid(g))
+names(transient) <- c("Date","Residuals")
+res <- transient$Residuals
+s <- max(abs(res))
+s <- 1.1*s
+wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+# sd <- scaleDate(transient$Date)
+pl3 <- ggplot(transient, aes(x=Date, y=Residuals)) + geom_point(size=1.3) +
+  #scale_x_date(limits=as.Date(c(sd[1],sd[length(sd)])),breaks=sd,expand=c(0,0),labels=date_format("%Y")) +
+  scale_x_date(labels=date_format("%Y-%m")) +
+  scale_y_continuous(limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+  geom_hline(aes(yintercept=0)) +
+  geom_smooth(method="loess", size=1.0, se=FALSE) +
+  theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, results='hide'}
+#NORMAL QUARTILE VS RESIDUAL
+transient <- data.frame(obs.data$Normal.Quantiles, resid(g))
+names(transient) <- c("Normal.Quantiles","Residuals")
+res <- transient$Residuals
+s <- max(abs(res))
+s <- 1.1*s
+wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+pl4 <- ggplot(transient, aes(x=Normal.Quantiles, y=Residuals)) + geom_point(size=1.3) +
+  scale_x_continuous("Normal Quantiles", limits=c(-3,3), expand=c(0,0),labels=comma) +
+  scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y, expand=c(0,0),labels=comma) +
+  geom_hline(aes(yintercept=0)) +
+  stat_smooth(method="lm", se=FALSE) +
+  theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=6, fig.width=6, results='hide'}
+#REGRESSION.COMPUTED VS OBSERVED - LOG UNITS (if transformed)
+if(logtrans %in% c("Log10", "ln")){
+  if(logtrans=="Log10") {
+    x = b.bcf*(10^obs.data$Regression.Computed)
+    y = 10^Data[,form[1]]
+  } else {
+    x = b.bcf * exp(obs.data$Regression.Computed)
+    y = exp(Data[,form[1]])
+  }
+} else {
+  x = obs.data$Regression.Computed
+  y = Data[,form[1]]  
+}
+transient <- data.frame(x,y)
+names(transient) <- c("Regression.Computed","Observed")
+if(logtrans %in% c("Log10", "ln")) {
+  wilk_x <- extended(max(transient$Regression.Computed),min(transient$Regression.Computed),5,only.loose=TRUE)
+  wilk_y <- extended(max(transient$Observed),min(transient$Observed),5,only.loose=TRUE)
+  if((max(wilk_x)-min(wilk_x))>(max(wilk_y)-min(wilk_y))) {
+    wilk_y <- wilk_x
+  } else {
+    wilk_x <- wilk_y
+  }
+  pl5 <- ggplot(transient, aes(x=Regression.Computed, y=Observed)) + geom_point(size=1.3) +
+    scale_x_continuous("Computed * BCF",limits=c(min(wilk_x),max(wilk_x)),breaks=wilk_x,expand=c(0,0),labels=comma) +
+    scale_y_continuous("",limits=c(min(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_abline(intercept=0, slope=1) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+} else {
+  pl5 <- ggplot(transient, aes(x=Regression.Computed, y=Observed)) + 
+    geom_point(size=1.3) +
+    geom_abline(intercept=0, slope=1) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+}
+```
+
+```{r, echo=FALSE, comment="",warning=FALSE, message=FALSE, results='hide'}
+
+transient <- data.frame(Data$Q, y=resid(g))
+names(transient) <- c("Stream.flow","Residuals")
+res <- transient$Residuals
+s <- max(abs(res))
+s <- 1.1*s
+wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+pl6 <- ggplot(transient, aes(x=Stream.flow, y=Residuals)) + geom_point(size=1.3) +
+  scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+  scale_x_log10("Streamflow",limits=scaleLog(transient$Stream.flow),expand=c(0,0),labels=comma) +
+  geom_hline(aes(yintercept=0)) +
+  geom_smooth(method="loess", size=1.0, se=FALSE) +
+  theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+rm(transient)
+
+```
+
+```{r, echo=FALSE, comment="",warning=FALSE, message=FALSE, results='hide'}
+if(logtrans %in% c("Log10", "ln")) {
+  if(logtrans=="Log10") {
+    x = (10^obs.data$Regression.Computed)
+    y = 10^Data[,form[1]]
+  } else {
+    x = exp(obs.data$Regression.Computed)
+    y = exp(Data[,form[1]])
+  }
+  transient <- data.frame(x,y)
+  names(transient) <- c("Regression.Computed","Observed")
+  pl7 <- ggplot(transient, aes(x=Regression.Computed, y=Observed)) + geom_point(size=1.3) +
+    # scale_x_log10("Computed", limits=scaleLog(transient$Regression.Computed),expand=c(0,0),labels=comma) +
+    # scale_y_log10(limits=scaleLog(transient$Observed),expand=c(0,0),labels=comma) +
+    geom_abline(intercept=0, slope=1) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm")) #+
+    #geom_smooth(method="loess", size=1.0, se=FALSE)
+  if(logtrans=="Log10") {
+    pl7 <- pl7 + 
+      scale_x_log10("Computed", limits=scaleLog(transient$Regression.Computed),expand=c(0,0),labels=comma) +
+      scale_y_log10(limits=scaleLog(transient$Observed),expand=c(0,0),labels=comma)
+  } else {
+    pl7 <- pl7 + 
+      scale_x_continuous("Computed", trans="log", labels=comma, expand=c(0,0), limits=c(min(scaleLN(x)), max(scaleLN(x))),
+                         breaks=scaleLN(x)) +
+      scale_y_continuous(trans="log", labels=comma, expand=c(0,0), limits=c(min(scaleLN(y)), max(scaleLN(y))), 
+                         breaks=scaleLN(y)) +
+      theme(axis.text.x = element_text(angle=45, hjust=1))
+  }
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=7, fig.width=8}
+if(logtrans %in% c("Log10", "ln")) {
+  multiplot(pl2,pl3,pl7,pl4,pl6,pl5, cols=2)
+} else {
+  multiplot(pl2,pl3,pl5,pl4,pl6, cols=2)
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE}
+formnlnQ <- formnl[!(formnl %in% "Q")]
+fff <- form[!(formnl %in% "Q")]
+if(length(formnlnQ) > 1) {
+  transient <- data.frame(Data[,formnl[2]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnlnQ[2]]) * 0.9
+  r2 <- max(Data[,formnlnQ[2]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp1 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("Residual",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[2], 1, 3) %in% c("log", "Log", "LOG")) {
+    rp1 <- rp1 + scale_x_log10(formnlnQ[2],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[2], 1, 2) %in% c("ln", "LN", "Ln")) {
+    rp1 <- rp1 + scale_x_continuous(formnlnQ[2], expand=c(0,0), labels=comma, trans="log",
+                                    limits = c(min(scaleLN(Data[,formnlnQ[2]])), max(scaleLN(Data[,formnlnQ[2]]))),
+                                    breaks = scaleLN(Data[,formnlnQ[2]])) +
+      theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp1 <- rp1 + scale_x_continuous(formnlnQ[2], expand=c(0,0), labels=comma, limits=c(r1, r2))
+  }
+  rm(transient)
+}
+if(length(formnlnQ)>2) {
+  transient <- data.frame(Data[,formnl[3]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnlnQ[3]]) * 0.9
+  r2 <- max(Data[,formnlnQ[3]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp2 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[3], 1, 3) %in% c("log", "LOG", "Log")) {
+    rp2 <- rp2 + scale_x_log10(formnlnQ[3],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[3],1,2) %in% c("ln", "LN", "Ln")) {
+    rp2 <- rp2 + scale_x_continuous(formnlnQ[3], expand=c(0,0),labels=comma, trans="log",
+                                  limits = c(min(scaleLN(Data[,formnlnQ[3]])), max(scaleLN(Data[,formnlnQ[2]]))),
+                                  breaks = scaleLN(Data[,formnlnQ[3]])) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp2 <- rp2 + scale_x_continuous(formnlnQ[3], expand=c(0,0),labels=comma, limits=c(r1, r2)) 
+  }
+  
+  rm(transient)
+}
+
+if(length(formnlnQ)>3) {
+  transient <- data.frame(Data[,formnl[4]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnl[4]]) * 0.9
+  r2 <- max(Data[,formnl[4]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp3 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("Residual",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[4], 1, 3) %in% c("log","LOG","Log")) {
+    rp3 <- rp3 + scale_x_log10(formnlnQ[4],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[4], 1, 2) %in% c("ln", "LN", "Ln")) {
+    rp3 <- rp3 + scale_x_continuous(formnlnQ[4], expand=c(0,0),labels=comma, trans="log",
+                                  limits = c(min(scaleLN(Data[,formnlnQ[4]])), max(scaleLN(Data[,formnlnQ[4]]))),
+                                  breaks = scaleLN(Data[,formnlnQ[4]])) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp3 <- rp3 + scale_x_continuous(formnlnQ[4], expand=c(0,0),labels=comma, limits=c(r1, r2)) 
+  }
+  rm(transient)
+}
+
+if(length(formnlnQ)>4) {
+  transient <- data.frame(Data[,formnl[5]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnlnQ[5]]) * 0.9
+  r2 <- max(Data[,formnlnQ[5]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp4 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[5], 1, 3) %in% c("log", "Log", "LOG")) {
+    rp4 <- rp4 + scale_x_log10(formnlnQ[5],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[5], 1, 2) %in% c("ln", "Ln", "LN")) {
+    rp4 <- rp4 + scale_x_continuous(formnlnQ[5], expand=c(0,0),labels=comma, trans="log",
+                                  limits = c(min(scaleLN(Data[,formnlnQ[5]])), max(scaleLN(Data[,formnlnQ[2]]))),
+                                  breaks = scaleLN(Data[,formnlnQ[5]])) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp4 <- rp4 + scale_x_continuous(formnlnQ[5], expand=c(0,0),labels=comma, limits=c(r1, r2)) 
+  }
+  rm(transient)
+}
+
+if(length(formnlnQ)>5) {
+  transient <- data.frame(Data[,formnl[6]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnl[6]]) * 0.9
+  r2 <- max(Data[,formnl[6]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp5 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("Residual",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[6], 1, 3) %in% c("log", "Log", "LOG")) {
+    rp5 <- rp5 + scale_x_log10(formnlnQ[6],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[6], 1, 2) %in% c("ln", "Ln", "LN")) {
+    rp5 <- rp5 + scale_x_continuous(formnlnQ[6], expand=c(0,0),labels=comma, trans="log",
+                                  limits = c(min(scaleLN(Data[,formnlnQ[6]])), max(scaleLN(Data[,formnlnQ[2]]))),
+                                  breaks = scaleLN(Data[,formnlnQ[6]])) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp5 <- rp5 + scale_x_continuous(formnlnQ[6], expand=c(0,0),labels=comma, limits=c(r1, r2)) 
+  }
+  rm(transient)
+}
+
+if(length(formnlnQ)>6) {
+  transient <- data.frame(Data[,formnl[7]], y=resid(g))
+  names(transient) <- c("Parameter","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  r1 <- min(Data[,formnlnQ[7]]) * 0.9
+  r2 <- max(Data[,formnlnQ[7]]) * 1.1
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  rp6 <- ggplot(transient, aes(x=Parameter, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  if(substr(fff[7], 1, 3) %in% c("log", "LOG", "Log")) {
+    rp6 <- rp6 + scale_x_log10(formnlnQ[7],limits=scaleLog(transient$Parameter),expand=c(0,0),labels=comma)
+  } else if(substr(fff[7],1,2) %in% c("ln", "LN", "Ln")) {
+    rp6 <- rp6 + scale_x_continuous(formnlnQ[7], expand=c(0,0), labels=comma, trans="log",
+                                  limits = c(min(scaleLN(Data[,formnlnQ[7]])), max(scaleLN(Data[,formnlnQ[2]]))),
+                                  breaks = scaleLN(Data[,formnlnQ[7]])) +
+    theme(axis.text.x = element_text(angle=45, hjust=1))
+  } else {
+    rp6 <- rp6 + scale_x_continuous(formnlnQ[7], expand=c(0,0), labels=comma, limits=c(r1, r2)) 
+  }
+  rm(transient)
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=2.5, fig.width=4}
+if(length(formnlnQ)-1==1) {
+  rp1
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=2.5, fig.width=8}
+if(length(formnlnQ)-1==2) {
+  multiplot(rp1, rp2, cols=2)
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=5, fig.width=8}
+if(length(formnlnQ)-1==3) {
+  multiplot(rp1, rp2, rp3, cols=2)
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=5, fig.width=8}
+if(length(formnlnQ)-1==4) {
+  multiplot(rp1, rp2, rp3, rp4, cols=2)
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=7.5, fig.width=8}
+if(length(formnlnQ)-1==5) {
+  multiplot(rp1, rp2, rp3, rp4, rp5, cols=2)
+}
+```
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=7.5, fig.width=8}
+if(length(formnlnQ)-1==6) {
+  multiplot(rp1, rp2, rp3, rp4, rp5, rp6, cols=2)
+}
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE}
+# #Calculate extents of the boxplot plotting window
+s <- max(abs(Residuals))
+s <- 1.3*s
+wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+
+#Boxplot of residuals by month
+bplotData <- data.frame(as.numeric(month(datetime)), Residuals)
+names(bplotData) <- c("month", "Residual")
+months <- c("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+monWData <- months[as.numeric(levels(factor(bplotData$month)))]
+bplotData$month <- months[bplotData$month]
+bplotData$month <- factor(bplotData$month, monWData)
+layout(matrix(c(1,1,1,2,1,1,1,2,1,1,1,2),3,4, byrow=TRUE))
+boxplot(Residual ~ month, data=bplotData, xlab="Month", ylab=paste("Residual (",form[1],")", sep=""), 
+        range=100, outline=FALSE, varwidth=TRUE, yaxt="n",yaxs="i", ylim=c(-1*max(wilk_y),max(wilk_y)), 
+        labels=format(wilk_y,format="d",big.mark=","))
+for(xi in 1:length(monWData)) {
+  text(x=xi,y=boxplot.stats(bplotData[bplotData$month==monWData[xi],2], coef=0)$stats[5],
+       as.character(nrow(bplotData[bplotData$month==monWData[xi],])), pos=3)
+}
+axis(2,at=wilk_y,labels=format(wilk_y,format="d",big.mark=","),las=2)
+abline(h=0, col="gray60")
+
+#Boxplot of observed and computed values of the dependent variable
+x = obs.data$Regression.Computed
+y = Data[,form[1]]
+somedata <- data.frame(x,y)
+names(somedata) <- c("Comp", "Obs")
+i <- " "
+
+if(logtrans=="Log10") {
+  somedata$Comp <- 10^(somedata$Comp)
+  somedata$Obs <- Data[,formnl[1]]
+}
+if(logtrans=="ln") {
+  somedata$Comp <- exp(somedata$Comp)
+  somedata$Obs <- Data[,formnl[1]]
+}
+
+td <- data.frame(boxplot.stats(somedata$Comp, coef=0)$stats,boxplot.stats(somedata$Obs, coef=0)$stats)
+big <- max(td[5,]) * 1.2
+small <- min(td[1,]) * 0.8
+wilk_y <- extended(big,small,5,only.loose=TRUE)
+names(somedata) <- c("Computed","Observed")
+defaultPar <- par()
+par(mar=c(5.1, 5, 4.1, 2.1), mgp=c(4,1,0))
+boxplot(somedata, range=100, outline=FALSE, ylab=formnl[1],yaxt="n",yaxs="i",ylim=c(min(wilk_y),max(wilk_y)), las=2)
+axis(2,at=wilk_y,labels=format(wilk_y,format="d",big.mark=","),las=2)
+text(x=1,y=boxplot.stats(somedata$Comp, coef=0)$stats[5], as.character(nrow(somedata)), pos=3)
+text(x=2, y=boxplot.stats(somedata$Obs, coef=0)$stats[5], as.character(nrow(somedata)), pos=3)
+par(defaultPar)
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE}
+#Box plots of residuals by year
+par(cex.lab = 0.75, cex.axis=0.75)
+resid_yr <- factor(year(datetime)) 
+residuals_value <- resid(g)
+s <- max(abs(resid(g)))
+s <- 1.2 * s
+wilk_y <- extended(-1 * max(extended(-1 * s,s, 5, only.loose=TRUE)), 
+                   max(extended(-1 * s, s, 5, only.loose=TRUE)), 5, only.loose=FALSE)
+
+boxplot(residuals_value ~ resid_yr, xlab="Year", ylab=paste("Residual (",form[1],")", sep=""), 
+        range=100, outline=FALSE, horizontal=FALSE, names = levels(resid_yr), 
+        ylim=c(-1*max(wilk_y),max(wilk_y)),yaxt="n",yaxs="i", varwidth=TRUE, las=2, boxwex=0.4)
+axis(2,at=wilk_y,labels=format(wilk_y,format="d",big.mark=","),las=2)
+abline(h=0, col="gray60")
+
+for(i in 1:length(levels(resid_yr))) {
+  text(x=i,y=boxplot.stats(residuals_value[resid_yr==levels(resid_yr)[i]], coef=0)$stats[5],
+       as.character(length(resid_yr[resid_yr==levels(resid_yr)[i]])), pos=3, cex=0.75)
+}
+
+```
+
+### Cross Validation
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, size=8, fig.height=5, fig.width=6}
+
+# CVlm(data=Data, form.lm=formula(f), m=10)
+cvsum <- cvsummary(data=Data, form.lm=formula(f), m=10)
+stats <- c(min(cvsum$MSE), mean(cvsum$MSE), median(cvsum$MSE), max(cvsum$MSE), mean(cvsum$MSE)/(b.sigma^2))
+names <- c("Minimum MSE of folds: ", "Mean MSE of folds: ", "Median MSE of folds: ",
+           "Maximum MSE of folds: ", "(Mean MSE of folds) / (Model MSE): ")
+cvout <- data.frame(names, signif(stats, 3))
+names(cvout) <- c(" ", "  ")
+print(cvout, row.names=FALSE)
+```
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=5, fig.width=3}
+par(cex.lab = 0.75, cex.axis=0.75)
+boxplot(cvsum$MSE, ylab="MSE of folds", boxwex=0.4, range=100)
+abline(h=(b.sigma^2), col="red")
+abline(h=(mean(cvsum$MSE)), col="blue")
+cat("Red line - Model MSE \n")
+cat("Blue line - Mean MSE of folds")
+```
+\pagebreak
+
+### Model-Calibration Data Set
+ 
+\scriptsize
+
+```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, size=8}
+options(width=200)
+
+combinedform <- c(form, formnl[!(formnl %in% form)])
+
+if(logtrans=="Log10")
+  base <- 10
+if(logtrans=="ln")
+  base <- exp(1)
+
+if(logtrans=="None") {
+  finalout <- data.frame(as.Date(datetime),Data[,combinedform],obs.data$Regression.Computed, 
+                         signif(obs.data$Residuals,3),signif(obs.data$Normal.Quantiles,3))
+  names(finalout) <- c("Date",combinedform,"Computed","Residual","Normal")
+  n2 <- c(" ",rep(" ",length(combinedform)),form[1]," ","Quantiles")
+} else {
+  finalout <- data.frame(as.Date(datetime),Data[,combinedform],obs.data$Regression.Computed,
+                         b.bcf*(base^obs.data$Regression.Computed),
+                         signif(obs.data$Residuals,3),signif(obs.data$Normal.Quantiles,3))
+  names(finalout) <- c("Date", combinedform,"Computed"," Computed","Residual","Normal")
+  n2 <- c(" ",rep(" ",length(combinedform)),form[1],formnl[1]," ","Quantiles")
+}
+finalout[,"Censored"] <- rep("--",times=nrow(finalout))
+censoredDates <- try(findCensored(StationID, NWISpCode,"1997-10-15",""), silent=TRUE)
+if(class(censoredDates) != "try-error") {
+  for(q in 1:nrow(finalout)) {
+    if(finalout[q,"Date"] %in% censoredDates$date) {
+      finalout$Censored[q] <- as.character(censoredDates$value[censoredDates$date %in% finalout[q,"Date"]])
+    }
+  }
+}
+#Round columns to 4 figures
+for(i in 2:(ncol(finalout))-1){
+  if(class(finalout[,i])=="numeric") {
+    finalout[,i] <- signif(finalout[,i],3)
+  }
+}
+#Convert all columns to text 
+for(i in 1:ncol(finalout)){
+  finalout[,i] <- as.character(finalout[,i])
+}
+#Add the last wrapped line to n2
+n2[length(n2)+1] <- "Values"
+#Put n2 at the top of finalout
+finalout <- rbind(n2,finalout)
+
+rnames <- rownames(finalout)
+rnames <- as.character(as.numeric(rnames)-1)
+finalout <- cbind(rnames, finalout)
+names(finalout)[1] <- ""
+print(finalout, row.names=FALSE)
+```
+\normalsize
+ 
+### Definitions
+ 
+```{r,echo=FALSE,comment="",warning=FALSE,message=FALSE}
+for(i in 1:length(formPCodes)) {
+  if(!(formPCodes[i]=="Day")){
+    cat(paste(formnl[i],": ",readNWISpCode(formPCodes[i])$srsname," in ",readNWISpCode(formPCodes[i])$parameter_units,
+              " (",formPCodes[i], ")\n", sep=""))
+  }
+}
+if("Day" %in% formPCodes) {
+  cat("DY: Date in decimal years")
+}
+```
+
+App Version 1.0
+
+    

@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  
+  <!-- Named type declarations : used to restrict values -->
+  <xs:simpleType name="stationNum">
+    <xs:restriction base="xs:string">
+        <xs:minLength value="8"/>
+        <xs:maxLength value="15"/>
+        <xs:pattern value="([0-9])+"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="pcodeNum">
+    <xs:restriction base="xs:string">
+        <xs:pattern value="[0-9][0-9][0-9][0-9][0-9]"/>
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="regTrans">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="none" />
+        <xs:enumeration value="log10" />
+        <xs:enumeration value="log" />
+        <xs:enumeration value="ln" />
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="expVariable">
+    <xs:restriction base="xs:string">
+      <xs:enumeration value="Intercept" />
+      <xs:enumeration value="Day" />
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="expVariableExtended">
+    <xs:union memberTypes="expVariable pcodeNum" />
+  </xs:simpleType>
+  <xs:simpleType name="expTrans">
+    <xs:restriction base="xs:string">
+        <xs:enumeration value="none" />
+        <xs:enumeration value="log10" />
+        <xs:enumeration value="log10^2" />
+        <xs:enumeration value="log10turbMA" />
+        <xs:enumeration value="log10^2turbMA" />
+        <xs:enumeration value="sin2pi" />
+        <xs:enumeration value="cos2pi" />
+        <xs:enumeration value="sin4pi" />
+        <xs:enumeration value="cos4pi" />
+        <xs:enumeration value="^2" />
+        <xs:enumeration value="sin2pi/365" />
+        <xs:enumeration value="cos2pi/365" />
+        <xs:enumeration value="sin4pi/365" />
+        <xs:enumeration value="cos4pi/365" />
+        <xs:enumeration value="ln" />
+        <xs:enumeration value="log" />
+    </xs:restriction>
+  </xs:simpleType>
+  <xs:simpleType name="YorN">
+    <xs:restriction base="xs:string">
+        <xs:pattern value="[Y,N]"/>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <!-- Element declarations : defines the structure of the xml file -->
+  
+  <xs:element name="model">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element type="stationNum" name="station_no"/>
+        <xs:element name="pcode">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element type="pcodeNum" name="pcode_id"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="dataset" minOccurs="0">
+          <xs:complexType>
+            <xs:all minOccurs="0">
+              <xs:element type="xs:string" name="meth_cd" minOccurs="0" maxOccurs="1"/>
+              <xs:element type="pcodeNum" name="backend_pcode_id_qwdata" minOccurs="0" maxOccurs="1"/>
+              <xs:element type="xs:float" name="load_conversion_factor_va" minOccurs="0" maxOccurs="1"/>
+              <xs:element type="xs:string" name="load_units_nm" minOccurs="0" maxOccurs="1"/>
+            </xs:all>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="datasetpart">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element type="xs:date" name="begin_dt"/>
+              <xs:element type="xs:date" name="end_dt" minOccurs="0" maxOccurs="1"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="regressionmodel">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element type="regTrans" name="transform_cd"/>
+              <xs:element type="xs:float" name="multiple_r2_va"/>
+              <xs:element type="xs:float" name="bias_corr_factor_va"/>
+              <xs:element type="xs:int" name="num_meas_va"/>
+              <xs:element type="xs:float" name="residual_stddev_va"/>
+              <xs:element type="xs:date" name="begin_dt"/>
+              <xs:element type="xs:date" name="end_dt" minOccurs="0" maxOccurs="1"/>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <xs:element name="explanatoryvariable" maxOccurs="unbounded" minOccurs="1">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element type="expVariableExtended" name="variable"/>
+              <xs:element type="xs:float" name="explan_coef_va"/>
+              <xs:element type="expTrans" name="transform_cd"/>
+              <xs:element type="xs:float" name="std_err_va"/>
+              <xs:element type="YorN" name="is_intercept"/>
+              <xs:element type="YorN" name="is_day_of_year"/>
+              <xs:element type="xs:int" name="term_order_va"/>
+              <xs:element name="covariance" maxOccurs="unbounded" minOccurs="0">
+                <xs:complexType>
+                  <xs:sequence>
+                    <xs:element type="xs:int" name="term"/>
+                    <xs:element type="xs:float" name="covariance_va"/>
+                  </xs:sequence>
+                </xs:complexType>
+              </xs:element>
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
