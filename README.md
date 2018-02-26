@@ -33,7 +33,7 @@ Once you have the packages installed, you can start the app with the following c
 
 ``` r
 library(shiny)
-runGitHub("PatrickEslick/regReport", launch.browser=TRUE)
+runGitHub("PatrickEslick/ModelArchiveSummary", launch.browser=TRUE)
 ```
 
 Using the app
