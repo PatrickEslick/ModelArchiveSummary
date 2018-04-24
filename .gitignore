@@ -2,6 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
-regReport.Rproj
+*.Rproj
 README.Rmd
 .gitignore
