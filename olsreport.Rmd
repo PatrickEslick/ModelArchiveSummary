@@ -916,20 +916,21 @@ if(logtrans %in% c("Log10", "ln")) {
 ```
 
 ```{r, echo=FALSE, comment="",warning=FALSE, message=FALSE, results='hide'}
-
-transient <- data.frame(Data$Q, y=resid(g))
-names(transient) <- c("Stream.flow","Residuals")
-res <- transient$Residuals
-s <- max(abs(res))
-s <- 1.1*s
-wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
-pl6 <- ggplot(transient, aes(x=Stream.flow, y=Residuals)) + geom_point(size=1.3) +
-  scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
-  scale_x_log10("Streamflow",limits=scaleLog(transient$Stream.flow),expand=c(0,0),labels=comma) +
-  geom_hline(aes(yintercept=0)) +
-  geom_smooth(method="loess", size=1.0, se=FALSE) +
-  theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
-rm(transient)
+if("Q" %in% names(Data)) {
+  transient <- data.frame(Data$Q, y=resid(g))
+  names(transient) <- c("Stream.flow","Residuals")
+  res <- transient$Residuals
+  s <- max(abs(res))
+  s <- 1.1*s
+  wilk_y <- extended(-1*max(extended(-1*s,s,5,only.loose=TRUE)),max(extended(-1*s,s,5,only.loose=TRUE)),5,only.loose=TRUE)
+  pl6 <- ggplot(transient, aes(x=Stream.flow, y=Residuals)) + geom_point(size=1.3) +
+    scale_y_continuous("",limits=c(-1*max(wilk_y),max(wilk_y)),breaks=wilk_y,expand=c(0,0),labels=comma) +
+    scale_x_log10("Streamflow",limits=scaleLog(transient$Stream.flow),expand=c(0,0),labels=comma) +
+    geom_hline(aes(yintercept=0)) +
+    geom_smooth(method="loess", size=1.0, se=FALSE) +
+    theme(plot.margin = unit(c(0.3,0.5,0.3,0.3), "cm"))
+  rm(transient)
+}
 
 ```
 
@@ -967,9 +968,17 @@ if(logtrans %in% c("Log10", "ln")) {
 
 ```{r, echo=FALSE, comment="", warning=FALSE, message=FALSE, fig.height=7, fig.width=8}
 if(logtrans %in% c("Log10", "ln")) {
-  multiplot(pl2,pl3,pl7,pl4,pl6,pl5, cols=2)
+  if("Q" %in% names(Data)) {
+    multiplot(pl2,pl3,pl7,pl4,pl6,pl5, cols=2)
+  } else {
+    multiplot(pl2, pl3, pl7, pl4, pl5, cols=2)
+  }
 } else {
-  multiplot(pl2,pl3,pl5,pl4,pl6, cols=2)
+  if("Q" %in% names(Data)) {
+    multiplot(pl2,pl3,pl5,pl4,pl6, cols=2)
+  } else {
+    multiplot(pl2,pl3,pl5,pl4,cols=2)
+  }
 }
 ```
 
